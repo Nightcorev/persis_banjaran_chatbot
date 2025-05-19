@@ -7,7 +7,6 @@ const path = require('path');
  */
 async function handleMessage(msg) {
     console.log(`📩 New message from ${msg.from} | Type: ${msg.type}`);
-
     // Handle pesan dengan media
     if (msg.hasMedia) {
         const media = await msg.downloadMedia();
