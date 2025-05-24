@@ -7,7 +7,7 @@ exports.informasiIuran = async function(phoneNumber) {
         
         // Get anggota data
         const anggotaResult = await dbQuery(
-            `SELECT id, nama_lengkap FROM t_anggota 
+            `SELECT id_anggota, nama_lengkap FROM t_anggota 
              WHERE no_telp = $1 OR no_wa = $2`,
             [normalizedPhone, normalizedPhone]
         );
@@ -23,7 +23,7 @@ exports.informasiIuran = async function(phoneNumber) {
             `SELECT * FROM t_iuran_log 
              WHERE anggota_id = $1 
              ORDER BY tanggal`,
-            [anggota.id]
+            [anggota.id_anggota]
         );
         
         if (iuranLogs.length === 0) {
@@ -123,6 +123,89 @@ exports.informasiIuran = async function(phoneNumber) {
     }
 };
 
+exports.sendReminderBatch = async function(anggotaId) {
+    try {
+        // Get anggota data
+        const anggotaResult = await dbQuery(
+            `SELECT id_anggota, nama_lengkap FROM t_anggota 
+             WHERE id_anggota = $1`,
+            [anggotaId]
+        );
+        
+        if (anggotaResult.length === 0) {
+            return 'Maaf, data anggota tidak ditemukan. Pastikan nomor WhatsApp Anda terdaftar sebagai anggota.';
+        }
+        
+        const anggota = anggotaResult[0];
+        
+        // Get iuran logs for this anggota
+        const iuranLogs = await dbQuery(
+            `SELECT * FROM t_iuran_log 
+             WHERE anggota_id = $1 
+             ORDER BY tanggal`,
+            [anggotaId]
+        );
+        
+        if (iuranLogs.length === 0) {
+            return `Tidak ada data iuran untuk anggota ${anggota.nama_lengkap}.`;
+        }
+        
+        // Current month and year
+        const currentDate = new Date();
+        const currentYear = currentDate.getFullYear();
+        const currentMonth = currentDate.getMonth() + 1; // January is 0
+        
+        // Process iuran data
+        let totalUnpaid = 0;
+        let unpaidMonths = [];
+        
+        // Initialize unpaid months for current year
+        for (let month = 1; month <= currentMonth; month++) {
+            unpaidMonths.push({
+                month,
+                year: currentYear,
+                nominal: 10000 // Assuming 10,000 per month
+            });
+        }
+        
+        // Process each payment log
+        iuranLogs.forEach(log => {
+            try {
+                const paidMonths = JSON.parse(log.paid_months.replace(/"/g, ''));
+                
+                paidMonths.forEach(month => {
+                    // Remove from unpaid months
+                    unpaidMonths = unpaidMonths.filter(m => 
+                        !(m.month === month && m.year === currentYear)
+                    );
+                });
+            } catch (e) {
+                console.error('Error parsing paid_months:', e);
+            }
+        });
+        
+        // Calculate total unpaid and prepare month names
+        let detailBulanTunggakan = [];
+        unpaidMonths.forEach(m => {
+            totalUnpaid += m.nominal;
+            detailBulanTunggakan.push(getMonthName(m.month));
+        });
+        
+        // Prepare data for the template
+        const reminderData = {
+            nama_lengkap: anggota.nama_lengkap,
+            jumlah_bulan_tunggakan: unpaidMonths.length,
+            detail_bulan_tunggakan: detailBulanTunggakan.join(', '),
+            nominal_tunggakan: totalUnpaid
+        };
+        
+        return exports.iuranReminderTemplate(reminderData);
+    } catch (error) {
+        console.error('Error in informasiIuran:', error);
+        return 'Maaf, terjadi kesalahan saat mengambil data iuran. Silakan coba lagi nanti.';
+    }
+};
+
 function getMonthName(monthNumber) {
     const monthNames = [
         'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
@@ -130,3 +213,18 @@ function getMonthName(monthNumber) {
     ];
     return monthNames[monthNumber - 1];
 }
+
+exports.iuranReminderTemplate = async function(data) {
+    return `⏰ Pemberitahuan Tunggakan Iuran: \n
+🕌 Assalamualaikum wr.wb
+
+Kepada Yth. Bapak/Ibu ${data.nama_lengkap}
+
+📣 Bersama pesan ini, kami ingin memberitahukan bahwa terdapat tunggakan iuran sebesar:
+    - 📅 Jumlah Bulan: ${data.jumlah_bulan_tunggakan} Bulan (${data.detail_bulan_tunggakan})
+    - 💰 Total Nominal: Rp ${new Intl.NumberFormat('id-ID').format(data.nominal_tunggakan)}
+
+🙏 Atas perhatian dan kerjasamanya, kami ucapkan terima kasih.
+
+🕌 Wassalamu'alaikum Warahmatullahi Wabarakatuh`;
+};

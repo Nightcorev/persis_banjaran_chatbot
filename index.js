@@ -10,13 +10,16 @@ const path = require('path');
 const formidable = require('formidable');
 const cors = require('cors');
 const { informasiAnggota } = require('./informasiAnggota');
-const { informasiIuran } = require('./informasiIuran');
+const { informasiIuran, iuranReminderTemplate, sendReminderBatch } = require('./informasiIuran');
+const { promisify } = require('util');
+const sleep = promisify(setTimeout);
 
 // Create the botFunctions object
 const botFunctions = {
     informasiAnggota,
     informasiIuran
 };
+
 
 const corsMiddleware = (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', 'http://localhost:5173');
@@ -76,10 +79,10 @@ client.on('message', async msg => {
         if (session.length === 0) {
             console.log('🟡 Sesi belum ada, buat sesi baru');
             await dbQuery(
-                'INSERT INTO t_sesi_pesan (no_wa, status_interaksi_bot, status_chat) VALUES ($1, $2, $3)',
-                [nomorPengirim, 'Ya', 'Berjalan']
+                'INSERT INTO t_sesi_pesan (no_wa, status_chat) VALUES ($1, $2)',
+                [nomorPengirim, 'Berjalan']
             );
-            session = await dbQuery('SELECT * FROM t_sesi_pesan WHERE no_wa = $1', [nomorPengirim]);
+            session = await dbQuery('SELECT * FROM t_sesi_pesan WHERE no_wa = $1 AND status_chat = $2', [nomorPengirim, 'Berjalan']);
         } else {
             console.log('🟢 Sesi sudah ada');
         }
@@ -89,6 +92,8 @@ client.on('message', async msg => {
             'SELECT * FROM t_riwayat_pesan WHERE id_sesi_pesan = $1 ORDER BY id_respon_bot DESC LIMIT 1',
             [session[0].id_sesi_pesan]
         );
+
+        console.log(checkChat);
 
        if (checkChat.length === 0) {
            console.log('📥 Belum ada riwayat chat, kirim daftar menu');
@@ -112,13 +117,14 @@ client.on('message', async msg => {
             }
             const botResponse = await dbQuery('SELECT * FROM t_respon_bot WHERE keyword = $1', [pesanPengirim]);
             if (botResponse.length > 0) {
+                
                 console.log(`✅ Keyword dikenali: ${botResponse.keyword}, tipe: ${botResponse.tipe_respon}`);
-                if (botResponse.tipe_respon === 'statis') {
+                if (botResponse[0].tipe_respon === 'statis') {
                     console.log('📤 Mengirim jawaban statis');
-                    await client.sendMessage(nomorPengirim, botResponse.jawaban);
+                    await client.sendMessage(nomorPengirim, botResponse[0].jawaban);
                     await dbQuery(
                         'INSERT INTO t_riwayat_pesan (id_sesi_pesan, id_respon_bot, pesan) VALUES ($1, $2, $3)',
-                        [session[0].id_sesi_pesan, botResponse.id_respon_bot, pesanPengirim]
+                        [session[0].id_sesi_pesan, botResponse[0].id_respon_bot, pesanPengirim]
                     );
                 } else {
                     console.log('📌 Keyword dengan tipe dinamis (belum ditangani)');
@@ -133,13 +139,13 @@ client.on('message', async msg => {
 
                     await dbQuery(
                         'INSERT INTO t_riwayat_pesan (id_sesi_pesan, id_respon_bot, pesan) VALUES ($1, $2, $3)',
-                        [session[0].id_sesi_pesan, botResponse.id_respon_bot, 'belum diimplement']
+                        [session[0].id_sesi_pesan, botResponse[0].id_respon_bot, responseText]
                     );
                     // Tambahkan logika untuk respon dinamis di sini
                 }
                 await dbQuery(
-                    'UPDATE t_sesi_pesan SET status_chat = $1, status_interaksi_bot = $2 WHERE no_wa = $3',
-                    ['Selesai', 'Tidak', nomorPengirim]
+                    'UPDATE t_sesi_pesan SET status_chat = $1 WHERE no_wa = $2',
+                    ['Selesai', nomorPengirim]
                 );
                 await client.sendMessage(nomorPengirim, 'Jika ingin mengakses informasi lainnya, silahkan kirim pesan');
             } else {
@@ -163,7 +169,7 @@ const server = http.createServer((req, res) => {
         req.on('end', async () => {
             try {
                 const data = JSON.parse(body);
-                let { no_wa, pesan, status_pengiriman, waktu_pengiriman, nama_file } = data;
+                let { no_wa, pesan, status_pengiriman, waktu_pengiriman, lampiran } = data;
 
                 if (!no_wa || !pesan || !status_pengiriman) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -183,10 +189,10 @@ const server = http.createServer((req, res) => {
                         nomor = nomor + '@c.us';
                 
                         try {
-                            if (pesan && !data.nama_file) {
+                            if (pesan && !data.lampiran) {
                                 await client.sendMessage(nomor, pesan);
-                            } else if (data.nama_file) {
-                                const filePath = path.join(__dirname, 'public', 'uploads', 'broadcast', data.nama_file);
+                            } else if (data.lampiran) {
+                                const filePath = path.join(__dirname, 'public', 'uploads', 'broadcast', data.lampiran);
                                 const media = MessageMedia.fromFilePath(filePath);
                                 await client.sendMessage(nomor, media, pesan ? { caption: pesan } : {});
                             } else {
@@ -200,7 +206,7 @@ const server = http.createServer((req, res) => {
                 
                         // Delay antar pesan (500ms untuk 2 pesan/detik)
                         if (i < no_wa.length - 1) {
-                            await sleep(500);
+                            await sleep(1000);
                         }
                     }
                     console.log('✅ Pesan berhasil dikirim.');
@@ -273,6 +279,76 @@ const server = http.createServer((req, res) => {
                     })
                 );
             });
+        });
+    }else if (req.method === 'POST' && req.url === '/send_reminder') {
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(body);
+                console.log(data);
+                if (data.no_telp.startsWith('08')) {
+                    data.no_telp = '62' + data.no_telp.slice(1);
+                }
+                data.no_telp = data.no_telp + '@c.us';
+                console.log(data.no_telp);
+                const responseText = await iuranReminderTemplate(data);
+                console.log(responseText);
+                await client.sendMessage(data.no_telp, responseText);
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: true, message: 'Reminder sent successfully' }));
+            } catch (error) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ success: false, message: error.message }));
+            }
+        });
+    }else if (req.method === 'POST' && req.url === '/send_reminder_batch') {
+        let body = '';
+        req.on('data', chunk => {
+            body += chunk.toString();
+        });
+        req.on('end', async () => {
+            try {
+                const data = JSON.parse(body);
+                console.log('Received reminder request:', data);
+                
+                if (!data.no_telp) {
+                    throw new Error('Nomor telepon tidak tersedia');
+                }
+
+                // Format phone number
+                let phoneNumber = data.no_telp;
+                if (phoneNumber.startsWith('08')) {
+                    phoneNumber = '62' + phoneNumber.slice(1);
+                }
+                phoneNumber = phoneNumber + '@c.us';
+                
+                // Get reminder message content
+                const responseText = await sendReminderBatch(data.anggota_id);
+                console.log('Reminder message:', responseText);
+                
+                await sleep(1000);
+                // Send WhatsApp message
+                await client.sendMessage(phoneNumber, responseText);
+                
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ 
+                    success: true, 
+                    message: 'Reminder sent successfully',
+                    anggota_id: data.anggota_id,
+                    nama: data.nama_lengkap
+                }));
+            } catch (error) {
+                console.error('Error sending batch reminder:', error);
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ 
+                    success: false, 
+                    message: error.message,
+                    originalData: body
+                }));
+            }
         });
     }else if (req.method === 'GET' && req.url.startsWith('/public/')) {
         const filePath = path.join(__dirname, req.url);
